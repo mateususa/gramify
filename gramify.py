@@ -4,7 +4,7 @@
 Usage:
   gramify.py word <input_file> (<output_file>|--stdout) [--min-length=<int>] [--max-length=<int>] [--ngram-more]
   gramify.py character <input_file> (<output_file>|--stdout) [--min-length=<int>] [--max-length=<int>] [--rolling]
-  gramify.py charset <input_file> <output_file> [--min-length=<int>] [--max-length=<int>] [--mixed] [--filter=<str>] [--filter-combo-length=<str>] [--cgram-rulify-beta]
+  gramify.py charset <input_file> (<output_file>|--stdout) [--min-length=<int>] [--max-length=<int>] [--mixed] [--filter=<str>] [--filter-combo-length=<str>] [--cgram-rulify-beta]
   gramify.py (-h | --help)
   gramify.py --version
 
@@ -13,13 +13,18 @@ Options:
   --version                     Show version.
   --min-length=<int>            Minimum size of k,n,c-gram output.
   --max-length=<int>            Maximum size of k,n,c-gram output.
-  --stdout                      Print output to screen (STDOUT)
+  --stdout                      Print output to STDOUT instead of a file. Not available when several files are
+                                written: character mode without rolling, or charset mode with filters.
   --rolling                     Make kgrams in one file based on length instead of into three groups of start, mid, end.
   --mixed                       Allow for mixed charset cgrams
   --filter=<str>                Filter for specific outputs using solo, duo, duostart, duoend, start, mid, and end. (Default uses no filter)
   --filter-combo-length=<int>   Create automatic filter combinations of start,mid,end (startmid,startmidmidendend) based on length [BETA]
   --cgram-rulify-beta           Convert cgram output into hashcat-rules [BETA]
   --ngram-more                  Add extra candidates by removing casing and special characters
+
+Input and output:
+  Use - as <input_file> to read from STDIN. Status messages go to STDERR, so --stdout only contains grams.
+  The output contains duplicates; count them with e.g. gramify.py character - --stdout --rolling | sort | uniq -c | sort -rn
 
 Gram-types:
   K-Gram (Character):           Letter based https://nlp.stanford.edu/IR-book/html/htmledition/k-gram-indexes-for-wildcard-queries-1.html
@@ -38,7 +43,9 @@ Filter:
 """
 import re
 import os
+import io
 import sys
+import errno
 import binascii
 from itertools import permutations
 from tqdm import tqdm
@@ -46,6 +53,32 @@ from docopt import docopt
 
 sys.setrecursionlimit(5000)
 output_file_names = []
+
+
+def open_input(input_file):
+    """Use - as <input_file> to read from STDIN"""
+    if input_file == "-":
+        if sys.stdin is None:
+            print("STDIN is not available.", file=sys.stderr)
+            sys.exit(1)
+        return io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="ignore")
+    return open(input_file, "r", encoding="utf-8", errors="ignore")
+
+
+def open_output(output_file, use_stdout):
+    """With --stdout the output goes to STDOUT instead of a file"""
+    if use_stdout:
+        return sys.stdout
+    print("Writing output to: " + output_file, file=sys.stderr)
+    output_file_names.append(output_file)
+    return open(output_file, "a+", encoding="utf-8", errors="ignore")
+
+
+def close_output(output_file_handler):
+    if output_file_handler is sys.stdout:
+        output_file_handler.flush()
+    else:
+        output_file_handler.close()
 
 
 def output_filter_writer(output_filter, output_filter_file_handler, matches):
@@ -303,11 +336,8 @@ def ngramify(docopt_args):
     else:
         max_length = int(docopt_args.get('--max-length'))
 
-    input_file_handler = open(input_file, "r", encoding="utf-8", errors="ignore")
-    if not use_stdout:
-        output_file_handler = open("n_" + output_file, "a+", encoding="utf-8", errors="ignore")
-        output_file_names.append("n_" + output_file)
-        print("Writing output to: n_" + output_file)
+    input_file_handler = open_input(input_file)
+    output_file_handler = open_output("n_" + str(output_file), use_stdout)
 
     data_raw = ""
     for line in input_file_handler:
@@ -319,10 +349,7 @@ def ngramify(docopt_args):
     for i in range(min_length, max_length+1, 1):
         for j in range(0, len(data)-i+1, 1):
             output_set = data[j:j+i]
-            if use_stdout:
-                print(" ".join(output_set))
-            else:
-                output_file_handler.write(" ".join(output_set) + "\n")
+            output_file_handler.write(" ".join(output_set) + "\n")
 
     if ngram_more:
         new_data = []
@@ -334,20 +361,14 @@ def ngramify(docopt_args):
         for i in range(min_length, max_length+1, 1):
             for j in range(0, len(data)-i+1, 1):
                 output_set = data[j:j+i]
-                if use_stdout:
-                    print(" ".join(output_set))
-                else:
-                    output_file_handler.write(" ".join(output_set) + "\n")
+                output_file_handler.write(" ".join(output_set) + "\n")
 
         for i in range(min_length, max_length+1, 1):
             for j in range(0, len(data)-i+1, 1):
                 output_set = data[j:j+i]
-                if use_stdout:
-                    print(" ".join(output_set).lower())
-                else:
-                    output_file_handler.write(" ".join(output_set).lower() + "\n")
+                output_file_handler.write(" ".join(output_set).lower() + "\n")
 
-    if not use_stdout: output_file_handler.close()
+    close_output(output_file_handler)
     input_file_handler.close()
 
 
@@ -369,38 +390,28 @@ def kgramify(docopt_args):
         max_length = int(docopt_args.get('--max-length'))
 
     if rolling:
-        if not use_stdout: print("Writing output to: k_rolling." + output_file)
-        in_handler = open(input_file, encoding="utf-8", errors="ignore")
-
-        if not use_stdout:
-            out_handler = open("k_rolling."+ output_file, "a+", encoding="utf-8", errors="ignore")
-            output_file_names.append("k_rolling." + output_file)
+        in_handler = open_input(input_file)
+        out_handler = open_output("k_rolling." + str(output_file), use_stdout)
 
         for line in in_handler:
             original_plaintext = decode_hex(line.rstrip("\r\n"))
             for i in range(min_length, max_length+1):
                 for j in range(0, len(original_plaintext)+(1-i)):
-                    if use_stdout:
-                        print(original_plaintext[j:j+i])
-                    else:
-                        out_handler.write(original_plaintext[j:j+i] + "\n")
+                    out_handler.write(original_plaintext[j:j+i] + "\n")
 
         in_handler.close()
-        if not use_stdout: out_handler.close()
+        close_output(out_handler)
 
     else:
         if use_stdout:
-            print("Cannot use --stdout without --rolling")
-            sys.exit(-1)
+            print("Cannot use --stdout without --rolling: start, mid and end are written to three files.", file=sys.stderr)
+            sys.exit(1)
 
-        print("Writing output to: k_start." + output_file)
-        print("Writing output to: k_mid." + output_file)
-        print("Writing output to: k_end." + output_file)
-        with open(input_file, encoding="utf-8", errors="ignore") as fp:
+        with open_input(input_file) as fp:
             line = True
-            start_file_handler = open("k_start."+ output_file, "a+", encoding="utf-8", errors="ignore")
-            mid_file_handler = open("k_mid."+ output_file, "a+", encoding="utf-8", errors="ignore")
-            end_file_handler = open("k_end."+ output_file, "a+", encoding="utf-8", errors="ignore")
+            start_file_handler = open_output("k_start." + output_file, False)
+            mid_file_handler = open_output("k_mid." + output_file, False)
+            end_file_handler = open_output("k_end." + output_file, False)
             while line:
                 line = fp.readline()
                 original_plaintext = decode_hex(line.rstrip("\r\n"))
@@ -418,9 +429,6 @@ def kgramify(docopt_args):
             start_file_handler.close()
             mid_file_handler.close()
             end_file_handler.close()
-        output_file_names.append("k_start." + output_file)
-        output_file_names.append("k_mid." + output_file)
-        output_file_names.append("k_end." + output_file)
 
 
 def kgramify_process(return_array, input_word, start, end, min_length, max_length):
@@ -522,6 +530,7 @@ def blocks(files, size=65536):
 def cgramify(docopt_args):
     input_file = docopt_args['<input_file>']
     output_file = docopt_args['<output_file>']
+    use_stdout = bool(docopt_args['--stdout'])
     lowercase =    set(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'])
     uppercase =    set(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'])
     numeric =      set(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'])
@@ -580,7 +589,7 @@ def cgramify(docopt_args):
                 item = item[len("start"):]
             if item.startswith("mid"):
                 if(min_length != 1):
-                    print("Warning: You are using a filter with 'mid'. It is highly advised to set --min-length to 1 for this.")
+                    print("Warning: You are using a filter with 'mid'. It is highly advised to set --min-length to 1 for this.", file=sys.stderr)
                 match =  True
                 item = item[len("mid"):]
             if item.startswith("end"):
@@ -589,30 +598,30 @@ def cgramify(docopt_args):
             if not match:
                 break
         if(len(item) > 0):
-            print("--filter value \"" + original_item + "\" is not a valid filter and must consist exclusively of solo, duo, duostart, duoend, start, mid, and end - or any combination of 'start, mid, or end'. (ex: startmidmidend)")
+            print("--filter value \"" + original_item + "\" is not a valid filter and must consist exclusively of solo, duo, duostart, duoend, start, mid, and end - or any combination of 'start, mid, or end'. (ex: startmidmidend)", file=sys.stderr)
             sys.exit(1)
 
-    print("Counting lines")
-    with open(input_file, "r",encoding="utf-8",errors='ignore') as f:
-        line_count = sum(bl.count("\n") for bl in blocks(f))
-    
-    input_file_handler = open(input_file, "r", encoding="utf-8", errors="ignore")
-    output_file_handler = open("c_" + output_file, "a+", encoding="utf-8", errors="ignore")
-    print("Writing output to: c_" + output_file)
-    output_file_names.append("c_" + output_file)
+    if use_stdout and output_filter:
+        print("Cannot use --stdout with --filter or --filter-combo-length: every filter is written to its own file.", file=sys.stderr)
+        sys.exit(1)
+
+    line_count = None  # STDIN can only be read once, so the progress bar has no total
+    if input_file != "-":
+        print("Counting lines", file=sys.stderr)
+        with open(input_file, "r",encoding="utf-8",errors='ignore') as f:
+            line_count = sum(bl.count("\n") for bl in blocks(f))
+
+    input_file_handler = open_input(input_file)
+    output_file_handler = open_output("c_" + str(output_file), use_stdout)
 
     output_filter_file_handler = {}
     for item in output_filter:
-        output_filter_file_handler[item] = open("c_" + item + "_" + output_file, "a+", encoding="utf-8", errors="ignore")
-        print("Writing filter output to: c_" + item + "_" + output_file)
-        output_file_names.append("c_" + item + "_" + output_file)
+        output_filter_file_handler[item] = open_output("c_" + item + "_" + output_file, False)
 
     output_rule_file_handler = {}
     if cgram_rulify:
         for item in output_filter:
-            output_rule_file_handler[item] = open("c_" + item + "_" + output_file + ".rule", "a+", encoding="utf-8", errors="ignore")
-            print("Writing rule output to: c_" + item + "_" + output_file + ".rule")
-            output_file_names.append("c_" + item + "_" + output_file + ".rule")
+            output_rule_file_handler[item] = open_output("c_" + item + "_" + output_file + ".rule", False)
 
     ########################
     ### Start processing ###
@@ -760,34 +769,37 @@ def cgramify(docopt_args):
 
     # Close file handles
     input_file_handler.close()
-    output_file_handler.close()
+    close_output(output_file_handler)
     for filter_item in output_filter:
         output_filter_file_handler[filter_item].close()
     for filter_item in output_rule_file_handler:
         output_rule_file_handler[filter_item].close()
 
-if __name__ == '__main__':
-    ARGS = docopt(__doc__, version='2.5')
-    if not os.path.exists(ARGS.get('<input_file>')):
-        print("Input file does not exist.")
-        sys.exit()
+def main():
+    if ARGS.get('<input_file>') != "-" and not os.path.exists(ARGS.get('<input_file>')):
+        print("Input file does not exist.", file=sys.stderr)
+        sys.exit(1)
 
     if ARGS.get('--min-length') is not None and int(ARGS.get('--min-length')) < 0:
-        print("Min Length should be greater than 0.")
-        sys.exit()
+        print("Min Length should be greater than 0.", file=sys.stderr)
+        sys.exit(1)
 
     if ARGS.get('--max-length') is not None and int(ARGS.get('--max-length', 1)) < 0:
-        print("Max Length should be greater than 0.")
-        sys.exit()
+        print("Max Length should be greater than 0.", file=sys.stderr)
+        sys.exit(1)
 
     if ARGS.get('--min-length') is not None and ARGS.get('--max-length') is not None:
         if int(ARGS.get('--min-length')) > int(ARGS.get('--max-length')):
-            print("Min Length should be smaller or equal to Max length.")
-            exit()
+            print("Min Length should be smaller or equal to Max length.", file=sys.stderr)
+            sys.exit(1)
 
     if ARGS.get('--filter-combo-length') is not None and not ARGS.get('--filter-combo-length').isnumeric():
-        print("Filter combo length should be numeric")
-        exit()
+        print("Filter combo length should be numeric", file=sys.stderr)
+        sys.exit(1)
+
+    if ARGS.get('--stdout'):
+        # Grams are UTF-8, whatever the console encoding is
+        sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 
     if ARGS.get('word'):
         ngramify(ARGS)
@@ -797,8 +809,23 @@ if __name__ == '__main__':
 
     if ARGS.get('charset'):
         cgramify(ARGS)
-    print()
-    print("Don't forget to de-duplicate and sort the output.\nRecommended commands:")
+
+    if not output_file_names:
+        return
+    print(file=sys.stderr)
+    print("Don't forget to de-duplicate and sort the output.\nRecommended commands:", file=sys.stderr)
     for item in output_file_names:
-        print("cat \"" + item + "\" | sort | uniq -c | sort -rn | awk '($1 >= 5)' | awk '{if ($1 >=1) {$1=\"\"; print substr($0, index($0, $2))}}' > \"" + item + ".sorted\"")
+        print("cat \"" + item + "\" | sort | uniq -c | sort -rn | awk '($1 >= 5)' | awk '{if ($1 >=1) {$1=\"\"; print substr($0, index($0, $2))}}' > \"" + item + ".sorted\"", file=sys.stderr)
+
+
+if __name__ == '__main__':
+    ARGS = docopt(__doc__, version='2.5')
+    try:
+        main()
+    except OSError as error:
+        # The reader of --stdout stopped early (e.g. "| head"); Windows reports this as EINVAL
+        if not (ARGS.get('--stdout') and (isinstance(error, BrokenPipeError) or error.errno == errno.EINVAL)):
+            raise
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(1)
 
